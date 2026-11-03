@@ -1,1 +1,79 @@
+name: Build apps
 
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build TorqueCalibration.app
+        env:
+          SKIP_TESTS: "1"
+        run: bash build_mac.sh
+      - name: Rename zip
+        run: mv TorqueCalibration_Mac.zip TorqueCalibration_Mac_${{ matrix.arch }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TorqueCalibration_Mac_${{ matrix.arch }}
+          path: TorqueCalibration_Mac_${{ matrix.arch }}.zip
+      - name: Run tests incl. real GUI smoke test (informational)
+        continue-on-error: true
+        env:
+          QT_QPA_PLATFORM: offscreen
+          GUI_SMOKE_DIR: ${{ github.workspace }}/gui_screens
+        run: |
+          mkdir -p gui_screens
+          .venv-build/bin/python -m pytest -v tests
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gui_screenshots_mac_${{ matrix.arch }}
+          path: gui_screens/
+          if-no-files-found: ignore
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build TorqueCalibration.exe
+        shell: cmd
+        env:
+          SKIP_TESTS: "1"
+        run: build_windows.bat
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TorqueCalibration_Windows
+          path: TorqueCalibration_Windows.zip
+      - name: Run tests incl. real GUI smoke test (informational)
+        continue-on-error: true
+        shell: cmd
+        env:
+          QT_QPA_PLATFORM: offscreen
+          GUI_SMOKE_DIR: ${{ github.workspace }}\gui_screens
+        run: |
+          mkdir gui_screens
+          .venv-build\Scripts\python -m pytest -v tests
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gui_screenshots_windows
+          path: gui_screens/
+          if-no-files-found: ignore
