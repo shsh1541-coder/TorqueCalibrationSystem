@@ -1,0 +1,10 @@
+NotoSansKR-Regular.ttf / NotoSansKR-Bold.ttf
+
+These files are subsets (Latin, symbols, Hangul) of "Noto Sans CJK KR"
+(Copyright 2014-2021 Adobe, with Reserved Font Name 'Source'), converted from
+CFF to TrueType outlines so that ReportLab can embed them in the PDF
+certificate. Internal family name: "TorqueCal Sans KR".
+
+Licensed under the SIL Open Font License, Version 1.1.
+Full license text: https://openfontlicense.org/open-font-license-official-text/
+Original font: https://github.com/notofonts/noto-cjk

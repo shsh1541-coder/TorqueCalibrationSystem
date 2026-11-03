@@ -1,0 +1,437 @@
+"""
+PDF demo calibration certificate (ReportLab), A4 portrait.
+
+The document carries the mandatory demo statement at the top and bottom of
+every page plus a light "SIMULATED DATA" watermark. No real laboratory logo,
+accreditation mark or certification sign is used.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import List
+
+from reportlab.graphics.shapes import Circle, Drawing, Line, PolyLine, Rect, String
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas as rl_canvas
+from reportlab.platypus import (KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer,
+                                Table, TableStyle)
+
+from .calibration import FAIL, INCONCLUSIVE, PASS
+from .config import (APP_VERSION, DEMO_BANNER, DEMO_DISCLAIMER, METHOD_NOTE, TOLERANCE_NOTE)
+from .fonts import register_fonts
+from .report_data import CertificateData
+from .uncertainty import assumptions_text
+
+NAVY = colors.HexColor("#14233c")
+NAVY_LIGHT = colors.HexColor("#e8edf5")
+ACCENT = colors.HexColor("#1f6feb")
+DEMO_RED = colors.HexColor("#c62828")
+GRID = colors.HexColor("#b8c2d1")
+GREEN = colors.HexColor("#2e7d32")
+AMBER = colors.HexColor("#b26a00")
+
+PAGE_W, PAGE_H = A4
+MARGIN_X = 16 * mm
+HEADER_H = 30 * mm
+FOOTER_H = 22 * mm
+
+
+def _latin(text: str) -> bool:
+    try:
+        str(text).encode("cp1252")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+class _Fonts:
+    def __init__(self):
+        self.kr, self.kr_bold, self.embedded = register_fonts()
+
+    def pick(self, text: str, bold: bool = False) -> str:
+        if _latin(text):
+            return "Helvetica-Bold" if bold else "Helvetica"
+        return self.kr_bold if bold else self.kr
+
+
+def _decision_color(d: str):
+    return {PASS: GREEN, FAIL: DEMO_RED, INCONCLUSIVE: AMBER}.get(d, colors.black)
+
+
+class _NumberedCanvas(rl_canvas.Canvas):
+    """Two-pass canvas so every page can show 'Page x / y'."""
+
+    def __init__(self, *args, data: CertificateData = None, fonts: _Fonts = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved = []
+        self._data = data
+        self._fonts = fonts
+
+    def showPage(self):
+        self._saved.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        total = len(self._saved)
+        for state in self._saved:
+            self.__dict__.update(state)
+            self._decorate(total)
+            super().showPage()
+        super().save()
+
+    # ------------------------------------------------------------------
+    def _decorate(self, total: int):
+        d, f = self._data, self._fonts
+        page = self._pageNumber
+        # Watermark
+        self.saveState()
+        self.setFillColor(colors.Color(0.78, 0.16, 0.16, alpha=0.06))
+        self.setFont("Helvetica-Bold", 70)
+        self.translate(PAGE_W / 2, PAGE_H / 2)
+        self.rotate(35)
+        self.drawCentredString(0, 0, "SIMULATED DATA")
+        self.restoreState()
+
+        # Header band
+        self.saveState()
+        self.setFillColor(NAVY)
+        self.rect(0, PAGE_H - HEADER_H + 8 * mm, PAGE_W, HEADER_H - 8 * mm, stroke=0, fill=1)
+        self.setFillColor(colors.white)
+        self.setFont("Helvetica-Bold", 15)
+        self.drawString(MARGIN_X, PAGE_H - 12 * mm, "TORQUE WRENCH CALIBRATION CERTIFICATE")
+        self.setFont(f.pick("교정성적서", True), 11)
+        self.drawString(MARGIN_X, PAGE_H - 18.5 * mm, "교정성적서")
+        self.setFont("Helvetica", 8.5)
+        self.drawRightString(PAGE_W - MARGIN_X, PAGE_H - 11 * mm, f"Certificate No.: {d.cert_no}")
+        self.drawRightString(PAGE_W - MARGIN_X, PAGE_H - 15.5 * mm,
+                             f"Calibration Date: {d.calibration_date}")
+        self.drawRightString(PAGE_W - MARGIN_X, PAGE_H - 20 * mm, f"Page {page} of {total}")
+        # Demo banner (top)
+        self.setFillColor(DEMO_RED)
+        self.rect(0, PAGE_H - HEADER_H, PAGE_W, 8 * mm, stroke=0, fill=1)
+        self.setFillColor(colors.white)
+        self.setFont(f.pick(DEMO_BANNER, True), 10)
+        self.drawCentredString(PAGE_W / 2, PAGE_H - HEADER_H + 2.8 * mm, DEMO_BANNER)
+        self.restoreState()
+
+        # Footer
+        self.saveState()
+        self.setStrokeColor(GRID)
+        self.line(MARGIN_X, FOOTER_H, PAGE_W - MARGIN_X, FOOTER_H)
+        self.setFillColor(DEMO_RED)
+        self.setFont(f.pick(DEMO_BANNER, True), 9)
+        self.drawCentredString(PAGE_W / 2, FOOTER_H - 5 * mm, DEMO_BANNER)
+        self.setFillColor(colors.HexColor("#333333"))
+        self.setFont("Helvetica", 7.5)
+        self.drawCentredString(PAGE_W / 2, FOOTER_H - 9.5 * mm, DEMO_DISCLAIMER)
+        self.setFillColor(colors.HexColor("#777777"))
+        self.setFont("Helvetica", 7)
+        self.drawString(MARGIN_X, 7 * mm,
+                        f"Generated by Torque Calibration System v{APP_VERSION} (Simulation Mode)")
+        self.drawRightString(PAGE_W - MARGIN_X, 7 * mm, f"{d.cert_no}  |  Page {page} / {total}")
+        self.restoreState()
+
+
+class CertificatePDF:
+    def __init__(self, data: CertificateData):
+        self.d = data
+        self.f = _Fonts()
+        self._styles()
+
+    def _styles(self):
+        kr, krb = self.f.kr, self.f.kr_bold
+        self.st_h = ParagraphStyle("h", fontName=krb, fontSize=10.5, leading=14, textColor=NAVY,
+                                   spaceBefore=6, spaceAfter=3)
+        self.st_body = ParagraphStyle("b", fontName=kr, fontSize=8.3, leading=11.2)
+        self.st_small = ParagraphStyle("s", fontName=kr, fontSize=7.4, leading=10,
+                                       textColor=colors.HexColor("#333333"))
+        self.st_cell = ParagraphStyle("c", fontName=kr, fontSize=8, leading=10)
+        self.st_cell_c = ParagraphStyle("cc", parent=self.st_cell, alignment=TA_CENTER)
+        self.st_cell_b = ParagraphStyle("cb", parent=self.st_cell, fontName=krb)
+
+    def P(self, text, style=None):
+        return Paragraph(str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"),
+                         style or self.st_body)
+
+    # --------------------------------------------------------------- build
+    def build(self, path: Path | str) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        doc = SimpleDocTemplate(
+            str(path), pagesize=A4, leftMargin=MARGIN_X, rightMargin=MARGIN_X,
+            topMargin=HEADER_H + 5 * mm, bottomMargin=FOOTER_H + 4 * mm,
+            title=f"{self.d.cert_no} - Torque Wrench Calibration Certificate (DEMO)",
+            author="Torque Calibration System (Simulation)",
+            subject=DEMO_BANNER, creator=f"Torque Calibration System v{APP_VERSION}")
+        story = []
+        story += self._general_info()
+        story += self._environment_and_method()
+        story += self._results_table()
+        story += self._additional_results()
+        story.append(PageBreak())
+        story += self._chart()
+        story += self._uncertainty_budget()
+        story += self._remarks()
+        story += self._signatures()
+        doc.build(story, canvasmaker=lambda *a, **k: _NumberedCanvas(*a, data=self.d,
+                                                                      fonts=self.f, **k))
+        return path
+
+    # ------------------------------------------------------------ sections
+    def _kv_table(self, rows, col_widths, overrides=None):
+        overrides = overrides or {}
+        data = []
+        for ri, row in enumerate(rows):
+            cells = []
+            for i, v in enumerate(row):
+                st = overrides.get((ri, i)) or (self.st_cell_b if i % 2 == 0 else self.st_cell)
+                cells.append(self.P(v, st))
+            data.append(cells)
+        t = Table(data, colWidths=col_widths)
+        style = [("GRID", (0, 0), (-1, -1), 0.4, GRID),
+                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                 ("TOPPADDING", (0, 0), (-1, -1), 2.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5)]
+        for c in range(0, len(col_widths), 2):
+            style.append(("BACKGROUND", (c, 0), (c, -1), NAVY_LIGHT))
+        t.setStyle(TableStyle(style))
+        return t
+
+    def _general_info(self):
+        e, d = self.d.equipment, self.d
+        w = PAGE_W - 2 * MARGIN_X
+        rows = [
+            ("Certificate No.", d.cert_no, "Calibration Date", d.calibration_date),
+            ("Customer", e.customer, "Issue Date", d.issue_date),
+            ("Equipment", e.equipment, "Manufacturer", e.manufacturer),
+            ("Model", e.model, "Serial Number", e.serial_number),
+            ("Maximum Capacity", f"{e.capacity:g} N·m", "Calibration Range", e.range_text),
+            ("Direction", e.direction, "Calibration Location", e.location),
+        ]
+        return [self.P("1. 기본정보 (General Information)", self.st_h),
+                self._kv_table(rows, [w * 0.2, w * 0.3, w * 0.2, w * 0.3])]
+
+    def _environment_and_method(self):
+        s = self.d.settings
+        w = PAGE_W - 2 * MARGIN_X
+        env = self._kv_table([("Temperature", f"{s.temperature:.1f} °C",
+                               "Relative Humidity", f"{s.humidity:.0f} %RH")],
+                             [w * 0.2, w * 0.3, w * 0.2, w * 0.3])
+        method = self._kv_table([
+            ("Method", "Torque Wrench Calibration Simulation"),
+            ("Educational Reference", "ISO 6789-2 (reference only)"),
+            ("Note", METHOD_NOTE + " 본 프로그램의 측정 시퀀스는 교육용으로 단순화된 절차입니다."),
+        ], [w * 0.2, w * 0.8])
+        return [self.P("2. 환경조건 (Environmental Conditions)", self.st_h), env,
+                self.P("3. 교정 방법 (Calibration Method)", self.st_h), method]
+
+    def _results_table(self):
+        s, r = self.d.settings, self.d.result
+        n = s.n_series
+        head = ["Nominal Torque\n(N·m)"] + [f"Series {i + 1}\n(N·m)" for i in range(n)] + \
+               ["Mean\n(N·m)", "Error\n(%)", "U (k=%g)\n(N·m)" % s.coverage_k, "Result"]
+        hst = ParagraphStyle("hw", parent=self.st_cell_c, textColor=colors.white,
+                             fontName="Helvetica-Bold")
+        data = [[Paragraph(h.replace("\n", "<br/>"), hst) for h in head]]
+        styles = []
+        for ri, p in enumerate(r.points, start=1):
+            dec = p.decision(r.decision_rule)
+            row = [f"{p.nominal:.2f}"] + [f"{v:.2f}" for v in p.values] + \
+                  [f"{p.mean:.2f}", f"{p.rel_error_pct:+.2f}", f"{p.U:.2f}", dec]
+            data.append(row)
+            styles.append(("TEXTCOLOR", (len(row) - 1, ri), (len(row) - 1, ri), _decision_color(dec)))
+            styles.append(("FONTNAME", (len(row) - 1, ri), (len(row) - 1, ri), "Helvetica-Bold"))
+        w = PAGE_W - 2 * MARGIN_X
+        ncol = len(head)
+        first = w * 0.14
+        rest = (w - first) / (ncol - 1)
+        t = Table(data, colWidths=[first] + [rest] * (ncol - 1), repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), NAVY),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 1), (-1, -1), 8.5),
+            ("ALIGN", (0, 1), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("GRID", (0, 0), (-1, -1), 0.4, GRID),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f7fb")]),
+            ("FONTNAME", (0, 1), (0, -1), "Helvetica-Bold"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ] + styles))
+        note = self.P(
+            "Torque unit: N·m. Measured values are shown with two decimal places. "
+            "Error (%) = (Mean − Nominal) / Nominal × 100. "
+            f"U is the expanded uncertainty (k = {s.coverage_k:g}) in N·m.", self.st_small)
+        return [self.P("4. 교정 결과 (Calibration Results)", self.st_h), t, Spacer(1, 2), note]
+
+    def _additional_results(self):
+        d, s, r = self.d, self.d.settings, self.d.result
+        w = PAGE_W - 2 * MARGIN_X
+        u_min = min(p.budget.U_rel_pct for p in r.points)
+        u_max = max(p.budget.U_rel_pct for p in r.points)
+        overall_txt = {PASS: "PASS - all points conform to the stated tolerance",
+                       FAIL: "FAIL - at least one point exceeds the stated tolerance",
+                       INCONCLUSIVE: "INCONCLUSIVE - conformity cannot be stated for all points"
+                       }[r.overall]
+        rows = [
+            ("Calibration Direction", d.equipment.direction),
+            ("Number of Measurements", f"{d.n_measurements} ({s.n_series} series × "
+                                       f"{len(s.points)} points)"),
+            ("Preloading Cycles", f"{len(d.preloads)} × "
+                                  f"{s.effective_preload_torque(d.equipment.capacity):g} N·m "
+                                  "(excluded from results)"),
+            ("Reference Instrument", s.reference_instrument),
+            ("Measurement Uncertainty", f"U = {u_min:.2f} % ~ {u_max:.2f} % of reading "
+                                        f"(k = {s.coverage_k:g}, approx. 95 %); "
+                                        f"max {r.max_U:.3f} N·m"),
+            ("Tolerance", f"±{s.tolerance_pct:g} % of nominal (educational assumption)"),
+            ("Conformity Assessment", overall_txt),
+            ("Decision Rule", r.decision_rule_text),
+        ]
+        ov = ParagraphStyle("ov", parent=self.st_cell_b, textColor=_decision_color(r.overall))
+        t = self._kv_table(rows, [w * 0.25, w * 0.75], overrides={(6, 1): ov})
+        return [KeepTogether([self.P("5. 추가 결과 (Additional Results)", self.st_h), t])]
+
+    def _chart(self):
+        return [self.P("6. 상대오차 그래프 (Relative Error vs Nominal Torque)", self.st_h),
+                relative_error_drawing(self.d, PAGE_W - 2 * MARGIN_X, 78 * mm),
+                self.P("Markers: mean relative error. Vertical bars: ±U (k=2) relative. "
+                       "Dashed red lines: tolerance limits.", self.st_small)]
+
+    def _uncertainty_budget(self):
+        s, r = self.d.settings, self.d.result
+        head = ["Nominal\n(N·m)", "s\n(N·m)", "uA\n(N·m)", "uref\n(N·m)",
+                "ures\n(N·m)", "uadd\n(N·m)", "uc\n(N·m)", "k", "U\n(N·m)",
+                "U\n(%)"]
+        hst = ParagraphStyle("hw2", parent=self.st_cell_c, textColor=colors.white,
+                             fontName="Helvetica-Bold", fontSize=7.5)
+        data = [[Paragraph(h.replace("\n", "<br/>"), hst) for h in head]]
+        for p in r.points:
+            b = p.budget
+            data.append([f"{p.nominal:.2f}", f"{p.std_dev:.4f}"] +
+                        [f"{c.u:.4f}" for c in b.components] +
+                        [f"{b.uc:.4f}", f"{b.k:g}", f"{b.U:.3f}", f"{b.U_rel_pct:.3f}"])
+        w = PAGE_W - 2 * MARGIN_X
+        t = Table(data, colWidths=[w / len(head)] * len(head), repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), NAVY), ("GRID", (0, 0), (-1, -1), 0.4, GRID),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 1), (-1, -1), 7.8),
+            ("ALIGN", (0, 1), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f7fb")]),
+        ]))
+        items = [self.P("7. 측정불확도 (Measurement Uncertainty Budget)", self.st_h), t,
+                 Spacer(1, 3)]
+        items += [self.P("• " + a, self.st_small) for a in assumptions_text(s)]
+        return items
+
+    def _remarks(self):
+        d = self.d
+        lines = [
+            "All torque values in this document were produced by a software simulation "
+            "(virtual torque measuring device). No physical instrument was connected.",
+            TOLERANCE_NOTE + " 기본 허용오차는 교육용 가정값입니다.",
+            "Preloading data are recorded separately and are not used for the mean value or "
+            "the uncertainty evaluation.",
+            f"Simulation record ID: {d.calibration_id if d.calibration_id is not None else '-'}; "
+            f"speed preset: {d.sim.preset} (timing only - does not affect results).",
+        ]
+        return [self.P("8. 비고 (Remarks)", self.st_h)] + \
+            [self.P(f"{i + 1}) {t}", self.st_small) for i, t in enumerate(lines)]
+
+    def _signatures(self):
+        s = self.d.settings
+        w = PAGE_W - 2 * MARGIN_X
+        data = [[self.P("Performed by", self.st_cell_b), self.P(s.performed_by, self.st_cell),
+                 self.P("Reviewed by", self.st_cell_b), self.P(s.reviewed_by, self.st_cell)],
+                [self.P("Signature", self.st_cell_b), "", self.P("Signature", self.st_cell_b), ""],
+                [self.P("Date", self.st_cell_b), "", self.P("Date", self.st_cell_b), ""]]
+        t = Table(data, colWidths=[w * 0.17, w * 0.33, w * 0.17, w * 0.33],
+                  rowHeights=[7 * mm, 14 * mm, 7 * mm])
+        t.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, GRID),
+                               ("BACKGROUND", (0, 0), (0, -1), NAVY_LIGHT),
+                               ("BACKGROUND", (2, 0), (2, -1), NAVY_LIGHT),
+                               ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+        return [Spacer(1, 4), KeepTogether([self.P("9. 서명 (Signatures)", self.st_h), t])]
+
+
+def relative_error_drawing(d: CertificateData, width: float, height: float) -> Drawing:
+    r, s = d.result, d.settings
+    dr = Drawing(width, height)
+    left, bottom, right, top = 16 * mm, 11 * mm, 6 * mm, 6 * mm
+    pw, ph = width - left - right, height - bottom - top
+    x_max = max(max(s.points), d.equipment.capacity) * 1.08
+    tol = s.tolerance_pct
+    extent = max(tol * 1.35, max(abs(p.rel_error_pct) + p.budget.U_rel_pct for p in r.points) * 1.2)
+    step = _nice_step(extent * 2 / 8)
+    y_lim = step * (int(extent / step) + 1)
+
+    def X(v):
+        return left + v / x_max * pw
+
+    def Y(v):
+        return bottom + (v + y_lim) / (2 * y_lim) * ph
+
+    dr.add(Rect(left, bottom, pw, ph, fillColor=colors.HexColor("#fbfcfe"), strokeColor=GRID,
+                strokeWidth=0.6))
+    # Grid + y labels
+    v = -y_lim
+    while v <= y_lim + 1e-9:
+        dr.add(Line(left, Y(v), left + pw, Y(v), strokeColor=colors.HexColor("#e1e6ee"),
+                    strokeWidth=0.4))
+        dr.add(String(left - 2, Y(v) - 2.5, f"{v:+.1f}" if abs(v) > 1e-9 else "0.0",
+                      fontName="Helvetica", fontSize=6.5, textAnchor="end"))
+        v += step
+    for p in s.points:
+        dr.add(Line(X(p), bottom, X(p), bottom + ph, strokeColor=colors.HexColor("#eef1f6"),
+                    strokeWidth=0.4))
+        dr.add(String(X(p), bottom - 8, f"{p:g}", fontName="Helvetica", fontSize=7,
+                      textAnchor="middle"))
+    dr.add(Line(left, Y(0), left + pw, Y(0), strokeColor=colors.HexColor("#7a869a"),
+                strokeWidth=0.6))
+    # Tolerance limits
+    for lim in (tol, -tol):
+        dr.add(Line(left, Y(lim), left + pw, Y(lim), strokeColor=DEMO_RED, strokeWidth=1,
+                    strokeDashArray=[4, 3]))
+        dr.add(String(left + pw - 2, Y(lim) + (2 if lim > 0 else -7),
+                      f"{'+' if lim > 0 else '-'}{tol:g} % limit", fontName="Helvetica",
+                      fontSize=6.5, fillColor=DEMO_RED, textAnchor="end"))
+    # Data
+    pts = []
+    for p in r.points:
+        x, y = X(p.nominal), Y(p.rel_error_pct)
+        ur = p.budget.U_rel_pct
+        dr.add(Line(x, Y(p.rel_error_pct - ur), x, Y(p.rel_error_pct + ur), strokeColor=ACCENT,
+                    strokeWidth=0.8))
+        for yy in (p.rel_error_pct - ur, p.rel_error_pct + ur):
+            dr.add(Line(x - 2.5, Y(yy), x + 2.5, Y(yy), strokeColor=ACCENT, strokeWidth=0.8))
+        pts += [x, y]
+    dr.add(PolyLine(pts, strokeColor=NAVY, strokeWidth=1.2))
+    for p in r.points:
+        dr.add(Circle(X(p.nominal), Y(p.rel_error_pct), 2.4, fillColor=NAVY,
+                      strokeColor=colors.white, strokeWidth=0.6))
+        dr.add(String(X(p.nominal) + 4, Y(p.rel_error_pct) + 3, f"{p.rel_error_pct:+.2f}",
+                      fontName="Helvetica", fontSize=6.3, fillColor=NAVY))
+    dr.add(String(left + pw / 2, 1.5, "Nominal Torque (N·m)", fontName="Helvetica",
+                  fontSize=7.5, textAnchor="middle"))
+    lab = String(0, 0, "Relative Error (%)", fontName="Helvetica", fontSize=7.5,
+                 textAnchor="middle")
+    from reportlab.graphics.shapes import Group
+    g = Group(lab)
+    g.translate(5, bottom + ph / 2)
+    g.rotate(90)
+    dr.add(g)
+    return dr
+
+
+def _nice_step(raw: float) -> float:
+    for s in (0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 2.5, 5.0, 10.0, 20.0):
+        if raw <= s:
+            return s
+    return 50.0
+
+
+def generate_pdf(data: CertificateData, path: Path | str) -> Path:
+    return CertificatePDF(data).build(path)
